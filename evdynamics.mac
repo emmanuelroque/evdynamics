@@ -1,0 +1,264 @@
+/*
+evdynamics
+
+A Maxima package to study evolutionary dynamics
+
+Author: Emmanuel Roque
+
+
+*/
+
+load("rkfun.fasl")$
+load(interpol)$
+load(distrib)$
+load(rkf45)$
+load(lapack)$
+load(operatingsystem)$
+
+make_ode_fun(name_eq,eq,list_vars)::=buildq([name_eq,eq,list_vars],
+        name_eq(splice(list_vars)):=block(
+            [],
+            mode_declare(list_vars,float),
+            eq
+                )
+)$
+
+/*This will be helpful for debugging or comparison purposes
+
+In the future it might support returning eqs in a specific format, like Octave's
+
+*/
+
+gen_W_matrix(Qmatrix,rep_rate,degr_rate):=block(
+    [W%, dim:length(rep_rate)],
+    local(W%),
+    W%[i,j]:=if is(i=j) then rep_rate[i]*Qmatrix[i][i]-degr_rate[i] else rep_rate[j]*Qmatrix[j][i],
+    genmatrix(W%,dim,dim)
+)$
+
+gen_eqs(Qmatrix,rep_rate,degr_rate,[options]):=block(
+    [Wmatrix,W%, dim:length(rep_rate),vars,xx%,xx,E%,stx,x,wrtf,eqs],
+    local(W%,x),
+    W%[i,j]:=if is(i=j) then rep_rate[i]*Qmatrix[i][i]-degr_rate[i] else rep_rate[j]*Qmatrix[j][i],
+    Wmatrix:genmatrix(W%,dim,dim),
+    stx:assoc('syntax,options,'maxima),
+    if is(stx='maxima) then(
+    xx%:makelist(concat(x,i),i,1,dim),
+    xx:transpose(matrix(xx%)),
+    E%:list_matrix_entries(Wmatrix.xx),
+    makelist(E%[i]-((rep_rate-degr_rate).xx)*xx%[i],i,1,dim)
+    ) elseif is(stx='octave) then(
+    xx%:makelist(x(i),i,1,dim),
+    xx:transpose(matrix(xx%)),
+    E%:list_matrix_entries(Wmatrix.xx),
+    eqs:expand(makelist(E%[i]-((rep_rate-degr_rate).xx)*xx%[i],i,1,dim)),
+    wrtf:assoc('file_name,options,'eqsf),
+    write_data(eqs,sconcat(string(wrtf),".tmp"),semicolon),
+    system(sconcat("./eqsformatting.sh ",string(wrtf))),
+    delete_file(sconcat(string(wrtf),".tmp")),
+    return('done)
+    )
+    else error("Syntax is not valid")
+)$
+
+solve_eigen_model(Qmatrix,rep_rate,degr_rate,x00,t0,tf,[options]):=block(
+    [Wmatrix,W%, dim:length(rep_rate),vars,xx%,xx,eqs,E%,
+     fun_eq,mthd,stp%,abstol],
+    local(W%),
+    W%[i,j]:=if is(i=j) then rep_rate[i]*Qmatrix[i][i]-degr_rate[i] else rep_rate[j]*Qmatrix[j][i],
+    Wmatrix:genmatrix(W%,dim,dim),
+    xx%:makelist(concat(x,i),i,1,dim),
+    xx:transpose(matrix(xx%)),
+    E%:list_matrix_entries(Wmatrix.xx),
+    eqs:makelist(E%[i]-((rep_rate-degr_rate).xx)*xx%[i],i,1,dim),
+    vars:append([t],xx%),
+    mthd:assoc('method,options,'rkfun),
+    abstol:assoc('absolute_tolerance,options,1e-6),
+    if is(mthd='rkfun) then (
+    fun_eq:makelist(concat(fun,i),i,1,dim),
+    stp%:assoc('step_size,options,0.1),
+    for i:1 thru dim do apply(make_ode_fun,[concat(fun,i),eqs[i],vars]),
+    map(compile,fun_eq),
+    rkfun(fun_eq,xx%,x00,[t,t0,tf,stp%])
+    ) elseif is(mthd='rkf45) then rkf45(eqs,xx%,x00,[t,t0,tf],'absolute_tolerance=abstol)
+    else error("The method is not valid")
+)$
+
+plot_evolution(sol,[options]):=block(
+    [dim:length(first(sol))-1,lbl],
+    lbl:assoc('print_labels,options,false),
+    if lbl then
+    wxdraw2d(
+        makelist(
+        [
+        color=mod(i-1,12),
+        key=sconcat("x",i-1),
+        points_joined=true,
+        point_type=dot,
+        points(makelist([p[1],p[i]],p,sol))
+        ],
+        i,2,dim+1
+        )
+    )
+    else
+     wxdraw2d(
+        makelist(
+        [
+        color=mod(i-1,12),
+        points_joined=true,
+        point_type=dot,
+        points(makelist([p[1],p[i]],p,sol))
+        ],
+        i,2,dim+1
+        )
+    )
+)$
+
+avg_fitness(sol,rep_rate,deg_rate):=block(
+    [space_sol],
+    space_sol:map(lambda([e],rest(e,1)),sol),
+    list_matrix_entries((rep_rate-deg_rate).transpose(apply('matrix,space_sol)))
+)$
+
+/*The weighted concentrations approach does not seem helpful but let's
+leave it here for the moment */
+
+weighted_concentrations(fitness,space_sol):=map(lambda([e],e*fitness),space_sol)$
+
+
+
+fitness_landscape_evolution(space_sol%,fit,[options]):=block(
+    [lngf:length(fit),lngspsol:length(space_sol%),frs,
+     weigthedc,wss,plot_fitness,avgfitness,fit_aux],
+    /*How much frames do we want in the animation*/
+    frs:assoc('frames,options,lngspsol),
+    if is(frs>lngspsol) then error("Number of frames to plot can't be greater
+    than the length of the list of solutions"),
+    /*Do we want to use weighted concentrations?*/
+    weigthedc:assoc('weights,options,false),
+    /*Do we want to plot the fitness values? */
+    plot_fitness:assoc('plot_fitness_values,options,false),
+    /*Do we want to plot the avg fitness?*/
+    avgfitness:assoc('avg_fitness,options,makelist(0,j,1,frs)),
+    if weigthedc then wss:weighted_concentrations(fit,space_sol%) else wss:space_sol%,
+    if plot_fitness then(
+    ymax:lreduce(max,fit),
+    fit_aux:fit/ymax,
+    with_slider_draw(
+    k, makelist(j,j,1,frs),
+    xrange=[1,lngf],
+    yrange=[0,1],
+    points_joined=impulses,line_width=4,color=blue,
+    points(fit_aux),
+    line_width=1,
+    color=red,
+    points_joined=false,
+    point_type=square,
+    points(wss[k]),
+    explicit(cspline(wss[k]),x,1,lngf),
+    color=green,
+    explicit(avgfitness[k],x,1,lngf)
+        )
+    )
+    else
+    with_slider_draw(
+    k, makelist(j,j,1,frs),
+    xrange=[1,lngf],
+    /*ymax=1 if we are not plotting fitness values*/
+    yrange=[0,1],
+    color=red,
+    points_joined=false,
+    point_type=square,
+    points(wss[k]),
+    explicit(cspline(wss[k]),x,1,lngf)
+    /*explicit(avgfitness[k],x,1,lngf)
+    No longer makes sense since it can be larger than 1
+    */
+    )
+)$
+
+ /*Binary sequences of length L, this is an option using recursion
+p
+ binary_sequences(n):=if is(n>1) then apply(append,makelist(map(lambda([e],append([k],e)),binary_sequences(n-1)),k,[0,1])) else [[0],[1]]$
+
+ */
+
+ binary_sequences(n)::=buildq([n,%aux:makelist(concat(i,k),k,1,n),%aux2:makelist([0,1],k,1,n),
+         %aux3:join(makelist(concat(i,k),k,1,n),makelist([0,1],k,1,n))],create_list(%aux,splice(%aux3)))$
+
+ hamming(L1,L2):=lsum(i,i,mod(L1+L2,2))$
+
+chop(expr,[options]):=block(
+    [abstlr:assoc('absolute_tolerance,options,1.0*10^(-12))],
+    scanmap(lambda([x],if is(numberp(x)) then (if is(abs(x)<abstlr) then 0.0 else x) else x),expr))$
+
+/*Further details about how to combine mutants into classes according to their Hamming distance to the
+master sequence can be found in [1]
+*/
+
+generate_mutation_matrix(u,n%,[options]):=block(
+     [seq,cmbd],local(ham,HH),
+    /*combine mutants by distance?*/
+    cmbd:assoc('combine_mutants,options,true),
+    if not cmbd then(
+    seq:binary_sequences(n%),
+    ham[i,j]:=lsum(k,k,mod(seq[i]+seq[j],2)),
+    HH[i,j]:=if is(i>j) then float(u^ham[i,j]*(1-u)^(n%-ham[i,j]))
+            elseif is(j>i) then H[j,i] elseif is(i=j) then float((1-u)^n%),
+    genmatrix(H,2^n%,2^n%)
+    ) else (
+        HH[l,k]:=sum((1-u)^(n%-2*j-abs(l-k))*(u)^(2*j+abs(l-k))*binomial(n%-(l-1),j+(abs(l-k)-(l-k))/2)*binomial(l-1,j+(abs(l-k)+l-k)/2),
+            j,0,ceiling((min(l+k-2,2*n%-(l+k-2))-abs(l-k))/2)),
+        genmatrix(HH,n%+1,n%+1)
+    )
+)$
+
+steady_state(u,A,D,N):=block([L,rgt,lft,eq],
+[L,rgt,lft]:dgeev(gen_W_matrix(generate_mutation_matrix(u,N),A,D),true,false),
+eq:abs(first(args(transpose(col(rgt,1))))),
+eq/lsum(x,x,eq)
+)$
+
+error_threshold(A,D,N,u0,uf,[options]):=block(
+    [nop:assoc('number_of_steps,options,(uf-u0)/100),ert,k0%],
+    ert:uf-u0,
+    makelist(cons(ert*j/nop,steady_state(ert*j/nop,A,D,N)),j,1,nop)
+)$
+
+log__(r):=if is(r<=0) then 0 elseif r>0 then log(r)$
+
+plot_error_threshold(ertshld,[options]):=block(
+    [lscl:assoc('log_scale,options,false),n%:length(first(ertshld))],
+    if is(lscl=false) then
+    wxdraw2d(
+        makelist(
+        [yrange=[0,1],
+        points_joined=true,
+        point_type=dot,
+        points(makelist([p[1],p[i]],p,ertshld))
+        ],
+        i,makelist(k,k,2,n%)
+        )
+    )
+    else
+    wxdraw2d(
+        makelist(
+        [yrange=[-20,0],
+        points_joined=true,
+        point_type=dot,
+        points(makelist([p[1],log__(p[i])],p,ertshld))
+        ],
+        i,makelist(k,k,2,n%)
+        )
+    )
+)$
+
+/*
+References:
+
+
+[1] Swetina & Schuster, Self-replication with errors: a model for polynucleotide replication, 1982, Biophysical Chemistry 16, 329-345
+
+
+
+*/
