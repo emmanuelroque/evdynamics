@@ -5,7 +5,6 @@ A Maxima package to study evolutionary dynamics
 
 Author: Emmanuel Roque
 
-
 */
 
 load("rkfun.fasl")$
@@ -85,12 +84,14 @@ solve_eigen_model(Qmatrix,rep_rate,degr_rate,x00,t0,tf,[options]):=block(
 )$
 
 plot_evolution(sol,[options]):=block(
-    [dim:length(first(sol))-1,lbl],
+    [dim:length(first(sol))-1,lbl,yr],
     lbl:assoc('print_labels,options,false),
+    yr:assoc('yrange,options,[0,1]),
     if lbl then
     wxdraw2d(
         makelist(
         [
+        yrange=yr,
         color=mod(i-1,12),
         key=sconcat("x",i-1),
         points_joined=true,
@@ -104,6 +105,7 @@ plot_evolution(sol,[options]):=block(
      wxdraw2d(
         makelist(
         [
+        yrange=yr,
         color=mod(i-1,12),
         points_joined=true,
         point_type=dot,
@@ -127,9 +129,11 @@ weighted_concentrations(fitness,space_sol):=map(lambda([e],e*fitness),space_sol)
 
 
 
-fitness_landscape_evolution(space_sol%,fit,[options]):=block(
-    [lngf:length(fit),lngspsol:length(space_sol%),frs,
-     weigthedc,wss,plot_fitness,avgfitness,fit_aux],
+fitness_landscape_evolution(eths,fit,[options]):=block(
+    [lngf:length(fit),lngspsol:length(eths),frs,
+     weigthedc,wss,plot_fitness,avgfitness,fit_aux,space_sol%,uval],
+    space_sol%:map(rest,eths),
+    uval:map(first,eths),
     /*How much frames do we want in the animation*/
     frs:assoc('frames,options,lngspsol),
     if is(frs>lngspsol) then error("Number of frames to plot can't be greater
@@ -148,6 +152,7 @@ fitness_landscape_evolution(space_sol%,fit,[options]):=block(
     k, makelist(j,j,1,frs),
     xrange=[1,lngf],
     yrange=[0,1],
+    title=sconcat("u=",float(uval[k])),
     points_joined=impulses,line_width=4,color=blue,
     points(fit_aux),
     line_width=1,
@@ -166,6 +171,7 @@ fitness_landscape_evolution(space_sol%,fit,[options]):=block(
     xrange=[1,lngf],
     /*ymax=1 if we are not plotting fitness values*/
     yrange=[0,1],
+    title=sconcat("u=",float(uval[k])),
     color=red,
     points_joined=false,
     point_type=square,
@@ -188,6 +194,14 @@ p
 
  hamming(L1,L2):=lsum(i,i,mod(L1+L2,2))$
 
+binary_sequences_ordered(n%):=block(
+    [LL:binary_sequences(n%),hh%:[]],
+    for i:0 thru n%+1 do hh%:append(hh%,sort(sublist(LL,lambda([x],is(n1s(x)=i))),'ordergreatp)),
+    return(hh%)
+)$
+
+n1s(ss):=lsum(e,e,ss)$
+
 chop(expr,[options]):=block(
     [abstlr:assoc('absolute_tolerance,options,1.0*10^(-12))],
     scanmap(lambda([x],if is(numberp(x)) then (if is(abs(x)<abstlr) then 0.0 else x) else x),expr))$
@@ -197,42 +211,76 @@ master sequence can be found in [1]
 */
 
 generate_mutation_matrix(u,n%,[options]):=block(
-     [seq,cmbd],local(ham,HH),
+     [seq,cmbd,ord%],local(ham,HH),
+    ord%:assoc('order,options,'hamming),
     /*combine mutants by distance?*/
     cmbd:assoc('combine_mutants,options,true),
     if not cmbd then(
-    seq:binary_sequences(n%),
+    if is(u=0) or is(u=0.0) then return(diagmatrix(2^n%,1))
+    elseif is(u=1) or is(u=1.0) then return(genmatrix(lambda([i,j], if is(i+j=2^n%+1) then 1.0 else 0.0),2^n%,2^n%))
+    else(
+    if is(ord%='natural) then seq:binary_sequences(n%) elseif is(ord%='hamming) then seq:binary_sequences_ordered(n%)
+    else error("Order is not valid"),
     ham[i,j]:=lsum(k,k,mod(seq[i]+seq[j],2)),
     HH[i,j]:=if is(i>j) then float(u^ham[i,j]*(1-u)^(n%-ham[i,j]))
-            elseif is(j>i) then H[j,i] elseif is(i=j) then float((1-u)^n%),
-    genmatrix(H,2^n%,2^n%)
+            elseif is(j>i) then HH[j,i] elseif is(i=j) then float((1-u)^n%),
+    genmatrix(HH,2^n%,2^n%)
+        )
     ) else (
+        if is(u=0) or is(u=0.0) then return(diagmatrix(n%+1,1)) else(
         HH[l,k]:=sum((1-u)^(n%-2*j-abs(l-k))*(u)^(2*j+abs(l-k))*binomial(n%-(l-1),j+(abs(l-k)-(l-k))/2)*binomial(l-1,j+(abs(l-k)+l-k)/2),
             j,0,ceiling((min(l+k-2,2*n%-(l+k-2))-abs(l-k))/2)),
         genmatrix(HH,n%+1,n%+1)
+        )
     )
 )$
 
-steady_state(u,A,D,N):=block([L,rgt,lft,eq],
-[L,rgt,lft]:dgeev(gen_W_matrix(generate_mutation_matrix(u,N),A,D),true,false),
-eq:abs(first(args(transpose(col(rgt,1))))),
-eq/lsum(x,x,eq)
+steady_state(u,A,D,N,[options]):=block(
+    [L,rgt,lft,eq,cmbd],
+    /*combine mutants by distance?*/
+    cmbd:assoc('combine_mutants,options,true),
+    if not cmbd then
+    [L,rgt,lft]:dgeev(gen_W_matrix(generate_mutation_matrix(u,N,'combine_mutants='false),A,D),true,false)
+    else
+    [L,rgt,lft]:dgeev(gen_W_matrix(generate_mutation_matrix(u,N),A,D),true,false),
+    eq:abs(first(args(transpose(col(rgt,1))))),
+    eq/lsum(x,x,eq)
 )$
 
-error_threshold(A,D,N,u0,uf,[options]):=block(
-    [nop:assoc('number_of_steps,options,(uf-u0)/100),ert,k0%],
+error_threshold(A%,D%,N%,u0,uf,[options]):=block(
+    [nop,ert,cmbd],
     ert:uf-u0,
-    makelist(cons(ert*j/nop,steady_state(ert*j/nop,A,D,N)),j,1,nop)
+    nop:assoc('number_of_steps,options,100),
+    cmbd:assoc('combine_mutants,options,true),
+    if not cmbd then
+    makelist(cons(u0+ert*j/nop,steady_state(u0+ert*j/nop,A%,D%,N%,'combine_mutants='false)),j,0,nop)
+    else
+    makelist(cons(u0+ert*j/nop,steady_state(u0+ert*j/nop,A%,D%,N%)),j,0,nop)
 )$
+
+/*error_threshold(A,D,N,u0,uf,[options]):=block(
+    [nos,ert,cmbd,lst],
+    ert:uf-u0,
+    nos:assoc('number_of_steps,options,ert/100),
+    cmbd:assoc('combine_mutants,options,true),
+    if not cmbd then
+    lst:makelist(cons(ert*j/nos,steady_state(ert*j/nos,A,D,N,'combine_mutants='false)),j,1,nos)
+    else
+    lst:makelist(cons(ert*j/nos,steady_state(ert*j/nos,A,D,N)),j,1,nos),
+    lst
+)$*/
 
 log__(r):=if is(r<=0) then 0 elseif r>0 then log(r)$
 
 plot_error_threshold(ertshld,[options]):=block(
-    [lscl:assoc('log_scale,options,false),n%:length(first(ertshld))],
-    if is(lscl=false) then
+    [lscl:assoc('log_scale,options,false),n%:length(first(ertshld)),lbl],
+    lbl:assoc('print_labels,options,false),
+    if is(lscl=false) then if lbl then
     wxdraw2d(
         makelist(
         [yrange=[0,1],
+        color=mod(i-1,12),
+        key=sconcat("x",i-1),
         points_joined=true,
         point_type=dot,
         points(makelist([p[1],p[i]],p,ertshld))
@@ -240,7 +288,33 @@ plot_error_threshold(ertshld,[options]):=block(
         i,makelist(k,k,2,n%)
         )
     )
-    else
+        else(
+        wxdraw2d(
+        makelist(
+        [yrange=[0,1],
+        points_joined=true,
+        point_type=dot,
+        points(makelist([p[1],p[i]],p,ertshld))
+        ],
+        i,makelist(k,k,2,n%)
+            )
+        )
+    )
+    else(
+    if lbl then
+    wxdraw2d(
+        makelist(
+        [yrange=[-20,0],
+        color=mod(i-1,12),
+        key=sconcat("x",i-1),
+        points_joined=true,
+        point_type=dot,
+        points(makelist([p[1],log__(p[i])],p,ertshld))
+        ],
+        i,makelist(k,k,2,n%)
+        )
+
+    ) else
     wxdraw2d(
         makelist(
         [yrange=[-20,0],
@@ -249,6 +323,8 @@ plot_error_threshold(ertshld,[options]):=block(
         points(makelist([p[1],log__(p[i])],p,ertshld))
         ],
         i,makelist(k,k,2,n%)
+        )
+
         )
     )
 )$
